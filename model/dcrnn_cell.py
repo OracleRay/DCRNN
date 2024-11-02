@@ -86,7 +86,6 @@ class DCGRUCell(RNNCell):
         - New state: Either a single `2-D` tensor, or a tuple of tensors matching
             the arity and shapes of `state`
         """
-
         with tf.variable_scope(scope or "dcgru_cell"):  # 添加变量的作用域（前缀）
             # 1.计算更新门u和重置门r
             with tf.variable_scope("gates"):
