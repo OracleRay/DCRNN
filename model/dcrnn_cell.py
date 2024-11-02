@@ -36,23 +36,25 @@ class DCGRUCell(RNNCell):
         :param use_gc_for_ru: whether to use Graph convolution to calculate the reset and update gates.
         """
         super(DCGRUCell, self).__init__(_reuse=reuse)
-        self._activation = activation
-        self._num_nodes = num_nodes
-        self._num_proj = num_proj
-        self._num_units = num_units
-        self._max_diffusion_step = max_diffusion_step
-        self._supports = []
-        self._use_gc_for_ru = use_gc_for_ru
+        self._activation = activation  # 激活函数，默认为 tanh，用于对更新后的状态进行非线性变换。
+        self._num_nodes = num_nodes  # 图中节点的总数。
+        self._num_proj = num_proj  # 输出的投影维度，若为 None 则不会进行投影操作。
+        self._num_units = num_units  # 指定 GRU 隐藏层的单元数（隐藏状态的维度），即每个节点在 GRU 中的输出维度。
+        self._max_diffusion_step = max_diffusion_step  # 最大扩散步数，决定了图卷积的邻域范围，即在图卷积操作中使用的步数。
+        self._supports = []  # 生成图卷积矩阵
+        self._use_gc_for_ru = use_gc_for_ru  # 布尔值，表示是否在 GRU 的重置门和更新门中使用图卷积操作。
         supports = []
-        if filter_type == "laplacian":
+        if filter_type == "laplacian":  # 计算归一化拉普拉斯矩阵
             supports.append(utils.calculate_scaled_laplacian(adj_mx, lambda_max=None))
-        elif filter_type == "random_walk":
+        elif filter_type == "random_walk":  # 计算随机游走矩阵的转置
             supports.append(utils.calculate_random_walk_matrix(adj_mx).T)
-        elif filter_type == "dual_random_walk":
+        elif filter_type == "dual_random_walk":  # 计算双重随机游走矩阵，即邻接矩阵和其转置的随机游走矩阵
             supports.append(utils.calculate_random_walk_matrix(adj_mx).T)
             supports.append(utils.calculate_random_walk_matrix(adj_mx.T).T)
-        else:
+        else:  # 默认使用拉普拉斯矩阵
             supports.append(utils.calculate_scaled_laplacian(adj_mx))
+
+        # 转换为 TensorFlow 的 SparseTensor 格式，以便高效地进行稀疏矩阵运算
         for support in supports:
             self._supports.append(self._build_sparse_matrix(support))
 
@@ -74,6 +76,7 @@ class DCGRUCell(RNNCell):
             output_size = self._num_nodes * self._num_proj
         return output_size
 
+    # 前向传播逻辑
     def __call__(self, inputs, state, scope=None):
         """Gated recurrent unit (GRU) with Graph Convolution.
         :param inputs: (B, num_nodes * input_dim)
@@ -83,24 +86,34 @@ class DCGRUCell(RNNCell):
         - New state: Either a single `2-D` tensor, or a tuple of tensors matching
             the arity and shapes of `state`
         """
-        with tf.variable_scope(scope or "dcgru_cell"):
-            with tf.variable_scope("gates"):  # Reset gate and update gate.
+
+        with tf.variable_scope(scope or "dcgru_cell"):  # 添加变量的作用域（前缀）
+            # 1.计算更新门u和重置门r
+            with tf.variable_scope("gates"):
                 output_size = 2 * self._num_units
                 # We start with bias of 1.0 to not reset and not update.
+                # 判断使用哪种方法计算更新门和重置门
                 if self._use_gc_for_ru:
                     fn = self._gconv
                 else:
                     fn = self._fc
                 value = tf.nn.sigmoid(fn(inputs, state, output_size, bias_start=1.0))
+                # 拆分并调整重置门和更新门的形状
                 value = tf.reshape(value, (-1, self._num_nodes, output_size))
                 r, u = tf.split(value=value, num_or_size_splits=2, axis=-1)
                 r = tf.reshape(r, (-1, self._num_nodes * self._num_units))
                 u = tf.reshape(u, (-1, self._num_nodes * self._num_units))
+
+            # 2.计算候选状态 c
             with tf.variable_scope("candidate"):
                 c = self._gconv(inputs, r * state, self._num_units)
                 if self._activation is not None:
                     c = self._activation(c)
+
+            # 3. 计算输出和新状态
             output = new_state = u * state + (1 - u) * c
+
+            # 4.可选的输出投影层: 调整输出的维度, 节省内存并简化后续操作
             if self._num_proj is not None:
                 with tf.variable_scope("projection"):
                     w = tf.get_variable('w', shape=(self._num_units, self._num_proj))
