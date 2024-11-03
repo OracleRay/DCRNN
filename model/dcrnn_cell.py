@@ -126,6 +126,7 @@ class DCGRUCell(RNNCell):
         x_ = tf.expand_dims(x_, 0)
         return tf.concat([x, x_], axis=0)
 
+    # 普通全连接
     def _fc(self, inputs, state, output_size, bias_start=0.0):
         dtype = inputs.dtype
         batch_size = inputs.get_shape()[0].value
@@ -142,6 +143,7 @@ class DCGRUCell(RNNCell):
         value = tf.nn.bias_add(value, biases)
         return value
 
+    # 扩散卷积
     def _gconv(self, inputs, state, output_size, bias_start=0.0):
         """Graph convolution between input and the graph matrix.
 
@@ -153,13 +155,15 @@ class DCGRUCell(RNNCell):
         :return:
         """
         # Reshape input and state to (batch_size, num_nodes, input_dim/state_dim)
+        # 1.合并输入和状态
         batch_size = inputs.get_shape()[0].value
         inputs = tf.reshape(inputs, (batch_size, self._num_nodes, -1))
         state = tf.reshape(state, (batch_size, self._num_nodes, -1))
-        inputs_and_state = tf.concat([inputs, state], axis=2)
+        inputs_and_state = tf.concat([inputs, state], axis=2)  # 将当前输入和上一个时间步的状态一起传入图卷积。
         input_size = inputs_and_state.get_shape()[2].value
         dtype = inputs.dtype
 
+        # 2.初始化图卷积
         x = inputs_and_state
         x0 = tf.transpose(x, perm=[1, 2, 0])  # (num_nodes, total_arg_size, batch_size)
         x0 = tf.reshape(x0, shape=[self._num_nodes, input_size * batch_size])
@@ -167,23 +171,27 @@ class DCGRUCell(RNNCell):
 
         scope = tf.get_variable_scope()
         with tf.variable_scope(scope):
-            if self._max_diffusion_step == 0:
+            if self._max_diffusion_step == 0:  # 根据 _max_diffusion_step 控制扩散层数，0 表示无扩散
                 pass
             else:
                 for support in self._supports:
+                    # 3.将 support（稀疏邻接矩阵）与 x0（或更新的 x1）相乘，模拟信息在图上扩散。
                     x1 = tf.sparse_tensor_dense_matmul(support, x0)
                     x = self._concat(x, x1)
 
+                    # 4.将扩散结果 x1、x2 依次拼接到 x 上
                     for k in range(2, self._max_diffusion_step + 1):
-                        x2 = 2 * tf.sparse_tensor_dense_matmul(support, x1) - x0
+                        x2 = 2 * tf.sparse_tensor_dense_matmul(support, x1) - x0  # 切比雪夫多项式算法
                         x = self._concat(x, x2)
                         x1, x0 = x2, x1
 
+            # 5.合并扩散结果：(batch_size * num_nodes, input_size * num_matrices)
             num_matrices = len(self._supports) * self._max_diffusion_step + 1  # Adds for x itself.
             x = tf.reshape(x, shape=[num_matrices, self._num_nodes, input_size, batch_size])
             x = tf.transpose(x, perm=[3, 1, 2, 0])  # (batch_size, num_nodes, input_size, order)
             x = tf.reshape(x, shape=[batch_size * self._num_nodes, input_size * num_matrices])
 
+            # 6.应用权重和偏置，得到卷积输出
             weights = tf.get_variable(
                 'weights', [input_size * num_matrices, output_size], dtype=dtype,
                 initializer=tf.contrib.layers.xavier_initializer())
